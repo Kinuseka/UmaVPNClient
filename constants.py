@@ -8,5 +8,8 @@ params = {
     "orderBy": "timestamp"
 }
 query_string = urlencode(params, doseq=True)
+FULL_URL = f"{ENDPOINT}{URI}"
 FULL_URL_QUERY = f"{ENDPOINT}{URI}?{query_string}"
 FULL_URL_DOWNLOAD = "{ENDPOINT}{URI}/{IP}/config?variant=current"
+GITHUB_ENDPOINT = "https://github.com/Kinuseka/UmaVPNClient"
+UPDATE_ENDPOINT = "https://github.com/Kinuseka/UmaVPNClient"

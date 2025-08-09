@@ -6,3 +6,4 @@ pythonping
 pyqtdarktheme
 pyinstaller
 BeautifulSoup4
+watchdog

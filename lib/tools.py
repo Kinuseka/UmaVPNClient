@@ -8,9 +8,20 @@ import constants as cnts
 import requests
 import socket
 import io
+import sys
+import os
 from urllib.parse import urlparse
 #Bind to logger
 log = logger.bind(name="UMVPN-logger")
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
 def pinger(IP):
     if not IP:
@@ -38,4 +49,24 @@ def dns_over_https(hostname):
     response.raise_for_status()
     return response.json()
 
-    
+def get_best_connection(data: dict):
+    sorted_data = sorted(data, key=lambda x: (-x["speed"], x["duration"]))
+    return sorted_data
+
+def find_servers(params:dict):
+    try:
+        response = requests.get(cnts.FULL_URL, params=params)
+        response.raise_for_status()
+        return True, response.json()
+    except Exception as e:
+        log.exception(f'Issue occured while fetching servers: {e}')
+        return False
+    return False, response
+
+def download_connection(IP: str):
+    FINAL_URL = FULL_URL_DOWNLOAD.format(ENDPOINT=ENDPOINT, URI=URI, IP=IP)
+    print(f"Downloading: {FINAL_URL}")
+    file_ovpn = requests.get(FINAL_URL)
+    with open("temp.ovpn", "wb") as f:
+        f.write(file_ovpn.content)
+
