@@ -242,7 +242,7 @@ class OpenVPNClient:
         rc = self._proc.poll() if self._proc else 0
         if rc is not None and self.status not in (VPNStatus.ERROR,):
             self._set_status(VPNStatus.DISCONNECTED, f"OpenVPN exited (code {rc})")
-
+    
     def _connect_management_with_retry(self, timeout: float):
         start = time.time()
         while time.time() - start < timeout and not self._stop_event.is_set():

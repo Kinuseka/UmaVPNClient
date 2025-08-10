@@ -10,7 +10,8 @@ import socket
 import io
 import sys
 import os
-from urllib.parse import urlparse
+import psutil
+from urllib.parse import urlparse, urlencode
 #Bind to logger
 log = logger.bind(name="UMVPN-logger")
 
@@ -55,7 +56,8 @@ def get_best_connection(data: dict):
 
 def find_servers(params:dict):
     try:
-        response = requests.get(cnts.FULL_URL, params=params)
+        query_string = urlencode(params, doseq=True)
+        response = requests.get(cnts.FULL_URL + "?" + query_string)
         response.raise_for_status()
         return True, response.json()
     except Exception as e:
@@ -63,10 +65,30 @@ def find_servers(params:dict):
         return False
     return False, response
 
-def download_connection(IP: str):
-    FINAL_URL = FULL_URL_DOWNLOAD.format(ENDPOINT=ENDPOINT, URI=URI, IP=IP)
-    print(f"Downloading: {FINAL_URL}")
-    file_ovpn = requests.get(FINAL_URL)
-    with open("temp.ovpn", "wb") as f:
-        f.write(file_ovpn.content)
+def download_connection(IP: str, target: str):
+    try:
+        FINAL_URL = cnts.FULL_URL_DOWNLOAD.format(ENDPOINT=cnts.ENDPOINT, URI=cnts.URI, IP=IP)
+        print(f"Downloading: {FINAL_URL}")
+        file_ovpn = requests.get(FINAL_URL)
+        with open(target, "wb") as f:
+            f.write(file_ovpn.content)
+        return True
+    except Exception as e:
+        log.exception(f'Issue occured while downloading connection: {e}')
+        return False
+    return True
 
+def find_existing_openvpn():
+        """Find existing OpenVPN processes."""
+        existing_processes = []
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['name'].lower() in ['openvpn.exe', 'openvpn']:
+                        existing_processes.append(proc)
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except Exception as e:
+            log.exception("Error finding existing OpenVPN processes")
+        
+        return existing_processes

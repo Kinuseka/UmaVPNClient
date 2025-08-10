@@ -7,3 +7,4 @@ pyqtdarktheme
 pyinstaller
 BeautifulSoup4
 watchdog
+psutil

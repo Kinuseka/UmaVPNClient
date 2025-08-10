@@ -2,7 +2,8 @@ from PyQt5.QtWidgets import QMainWindow, QApplication, QWidget, QPushButton
 from PyQt5.QtWidgets import QComboBox, QGroupBox, QMenu, QGraphicsDropShadowEffect
 from PyQt5.QtWidgets import QGridLayout, QScrollArea, QLabel, QToolButton
 from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QMessageBox, QStyle, QAction
-from PyQt5.QtWidgets import QSystemTrayIcon, QTextEdit
+from PyQt5.QtWidgets import QSystemTrayIcon, QTextEdit, QDialog, QSpinBox, QLineEdit
+from PyQt5.QtWidgets import QFormLayout, QDialogButtonBox
 from PyQt5 import QtCore
 from PyQt5.QtCore import QPoint, QSize, QSettings, pyqtSignal
 from PyQt5.QtCore import Qt
@@ -12,7 +13,8 @@ import threading
 from typing import Iterable
 import sys, os
 import time
-from lib.tools import pinger, handle_ping, resource_path
+import atexit
+from lib.tools import pinger, handle_ping, resource_path, find_servers, get_best_connection, download_connection, find_existing_openvpn
 from lib.openvpnclient import OpenVPNClient, VPNStatus
 # from lib.servers import SERVERS
 from version_handler import __version__
@@ -27,6 +29,8 @@ class GUI(QWidget):
     def __init__(self, parent) -> None:
         super().__init__(parent)
         self.output_signal.connect(self.append_output)
+        self.load_settings()
+        self.settings_window = None
         self.colors = ["green", "orange", "red", "grey"]
         #Initialize layouts
         self.layout = QVBoxLayout(self)
@@ -47,6 +51,9 @@ class GUI(QWidget):
         layout.addLayout(gridLayout)
         self.layout.addLayout(layout)
         self.setLayout(self.layout)
+        
+        # Load saved mode selection
+        self.load_saved_mode()
     
     def __threaded_option(self,func: object = None,args: Iterable = ()):
         thread = threading.Thread(target=func,args=args)
@@ -70,7 +77,11 @@ class GUI(QWidget):
         menu = QMenu(self)
         action_update = QAction("Check for updates",self)
         action_update.triggered.connect(lambda: self.__threaded_option(func=self._check_updates))
+        action_options = QAction("Options",self)
+        action_options.triggered.connect(self._show_options)
         menu.addAction(action_update)
+        menu.addSeparator()
+        menu.addAction(action_options)
         ellipsis.setMenu(menu)
         ellipsis.setStyleSheet("QToolButton::menu-indicator { image: none; }")
         #
@@ -99,6 +110,7 @@ class GUI(QWidget):
         layout = QGridLayout()
         self.regionComboBox = QComboBox(self)
         self.regionComboBox.addItems(["JP", "JP+DMM", "Global"])
+        self.regionComboBox.currentTextChanged.connect(self.save_selected_mode)
         self.connectButton = QPushButton("Connect")
         self.disconnectButton = QPushButton("Disconnect")
         self.disconnectButton.setEnabled(False)
@@ -127,9 +139,7 @@ class GUI(QWidget):
                 font-size: 10pt;
                 padding: 5px;
             }
-        """)
-        self.output_text.append("UMVPN initialized...")
-        
+        """)        
         layout.addWidget(self.output_text)
         group.setLayout(layout)
         return group
@@ -172,29 +182,92 @@ class GUI(QWidget):
     def toggle_connection(self):
         if self.is_connected:
             self.log_output("Disconnecting VPN...")
-            self.stop_ping()
-            self.vpn_client.stop()
+            self.__threaded_option(func=self._disconnect_vpn)
+        else:
+            region = self.regionComboBox.currentText()
+            
+            # Check for existing OpenVPN processes before connecting
+            existing_processes = find_existing_openvpn()
+            if existing_processes:
+                # Ask user for confirmation to terminate existing processes
+                if not self._confirm_process_termination(len(existing_processes)):
+                    self.log_output("Connection cancelled - existing VPN processes not terminated")
+                    return
+            
+            self.log_output(f"Connecting to {region}...")
+            # Update UI immediately to show connecting state
+            self.connectButton.setEnabled(False)
+            self.qlinear.setText("Status: Connecting...")
+            self.plinear.setText(f'Status: <font color="orange">Connecting</font>')
+            # Run connection in background thread
+            self.__threaded_option(func=self._connect_vpn, args=(region,))
+    
+    def _connect_vpn(self, region):
+        """Background thread method for VPN connection."""
+        try:
+            # Clean up any existing OpenVPN processes (user already confirmed)
+            existing_processes = find_existing_openvpn()
+            if existing_processes:
+                self.log_output("Cleaning up existing VPN connections...")
+                self._terminate_openvpn_processes(existing_processes)
+            
+            types = {
+                "JP": {"sites": "uma"},
+                "JP+DMM": {"sites": "uma", "sites": "dmm"},
+                "Global": {"sites": "umag"}
+            }
+            sel = types[region]
+            self.log_output("Finding servers...")
+            status, response = find_servers(sel)
+            
+            if not status:
+                self.log_output("ERROR: Failed to find servers")
+                self._reset_connect_state()
+                return
+                
+            config_path = resource_path(f"_vcache.ovpn")
+            best_connection = get_best_connection(response["data"])
+            download_connection(best_connection[0]["ip"], config_path)
+            self.vpn_client = OpenVPNClient(
+                config_path=config_path, 
+                on_status_change=self.on_vpn_status_change,
+                management_host=self.vpn_management_host,
+                management_port=self.vpn_management_port
+            )
+            self.vpn_client.start()
+            
+        except FileNotFoundError as e:
+            self.log_output(f"ERROR: Config not found for {region}")
+            log.exception(f"Config file not found for region {region}")
+            self._reset_connect_state()
+            self._call_error_window("Config not found!", f"The VPN configuration for {region} was not found.")
+        except Exception as e:
+            error_msg = str(e) if str(e) else f"Unknown error ({type(e).__name__})"
+            self.log_output(f"ERROR: {error_msg}")
+            log.exception("VPN connection error")
+            self._reset_connect_state()
+            self._call_error_window("Connection Error", error_msg)
+    
+    def _disconnect_vpn(self):
+        """Background thread method for VPN disconnection."""
+        try:
+            # self.stop_ping()
+            if self.vpn_client:
+                self.vpn_client.stop()
             self.connectButton.setEnabled(True)
             self.disconnectButton.setEnabled(False)
             self.is_connected = False
             self.update_current_server()
-        else:
-            region = self.regionComboBox.currentText()
-            config_path = f"res/config/{region}.ovpn"
-            self.log_output(f"Connecting to {region}...")
-            self.vpn_client = OpenVPNClient(config_path=config_path, on_status_change=self.on_vpn_status_change)
-            
-            try:
-                self.vpn_client.start()
-                self.connectButton.setEnabled(False)
-                self.qlinear.setText("Status: Connecting...")
-                self.plinear.setText(f'Status: <font color="orange">Connecting</font>')
-            except FileNotFoundError:
-                self.log_output(f"ERROR: Config not found for {region}")
-                self._call_error_window("Config not found!", f"The VPN configuration for {region} was not found.")
-            except Exception as e:
-                self.log_output(f"ERROR: {str(e)}")
-                self._call_error_window("Connection Error", str(e))
+        except Exception as e:
+            error_msg = str(e) if str(e) else f"Unknown error ({type(e).__name__})"
+            self.log_output(f"ERROR during disconnect: {error_msg}")
+            log.exception("VPN disconnect error")
+    
+    def _reset_connect_state(self):
+        """Reset UI to disconnected state on connection failure."""
+        self.connectButton.setEnabled(True)
+        self.qlinear.setText("Status: Disconnected")
+        self.plinear.setText(f'Status: <font color="red">Disconnected</font>')
     
     def on_vpn_status_change(self, status: VPNStatus, message: str):
         if status == VPNStatus.CONNECTED:
@@ -209,13 +282,87 @@ class GUI(QWidget):
                 self.log_output("VPN Disconnected")
             else:
                 self.log_output(f"VPN ERROR: {message}")
-            self.stop_ping()
+                log.exception(f"VPN status error: {message}")
+            
+            # Always reset to disconnected state on any non-connected status
+            self._force_disconnect_state()
+            
+            if status == VPNStatus.ERROR:
+                self._call_error_window("VPN Error", message)
+    
+    def _force_disconnect_state(self):
+        """Force UI and state to disconnected, regardless of current state."""
+        try:
+            # self.stop_ping()  # Already commented out per user's edit
             self.connectButton.setEnabled(True)
             self.disconnectButton.setEnabled(False)
             self.is_connected = False
             self.update_current_server()
-            if status == VPNStatus.ERROR:
-                self._call_error_window("VPN Error", message)
+        except Exception as e:
+            log.exception("Error forcing disconnect state")
+    
+    
+    
+    def _confirm_process_termination(self, process_count):
+        """Ask user for confirmation before terminating existing VPN processes."""
+        msg = QMessageBox(self.parent())
+        msg.setIcon(QMessageBox.Question)
+        msg.setWindowTitle("Existing VPN Connection")
+        
+        if process_count == 1:
+            msg.setText("<b>Existing VPN Process Detected</b>")
+            msg.setInformativeText(
+                "An OpenVPN process is already running. "
+                "This may interfere with the new connection.\n\n"
+                "Do you want to terminate it and proceed?"
+            )
+        else:
+            msg.setText("<b>Multiple VPN Processes Detected</b>")
+            msg.setInformativeText(
+                f"{process_count} OpenVPN processes are already running. "
+                "These may interfere with the new connection.\n\n"
+                "Do you want to terminate them and proceed?"
+            )
+        
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.Yes)
+        
+        # Set always-on-top in dev mode
+        if self.parent().dev_mode:
+            msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
+        
+        result = msg.exec_()
+        return result == QMessageBox.Yes
+    
+    def _terminate_openvpn_processes(self, processes):
+        """Terminate the specified OpenVPN processes."""
+        try:
+            killed_count = 0
+            for proc in processes:
+                try:
+                    log.info(f"Terminating existing OpenVPN process (PID: {proc.pid})")
+                    proc.terminate()
+                    killed_count += 1
+                    # Wait briefly for graceful termination
+                    try:
+                        proc.wait(timeout=3)
+                    except psutil.TimeoutExpired:
+                        # Force kill if it doesn't terminate gracefully
+                        proc.kill()
+                        log.warning(f"Force killed OpenVPN process (PID: {proc.pid})")
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    # Process already gone or no access
+                    continue
+            
+            if killed_count > 0:
+                self.log_output(f"Terminated {killed_count} existing OpenVPN process(es)")
+                log.info(f"Terminated {killed_count} existing OpenVPN processes")
+                # Brief pause to ensure processes are fully terminated
+                time.sleep(1)
+                
+        except Exception as e:
+            log.exception("Error during OpenVPN process termination")
+            self.log_output("Warning: Could not complete OpenVPN cleanup")
 
     # def ping_event_loop(self):
     #     region = self.regionComboBox.currentText()
@@ -285,13 +432,95 @@ class GUI(QWidget):
     def _update_text(self):
         self.qline.setText(self.ping_text)
     
+    def load_settings(self):
+        """Load VPN settings from storage."""
+        settings = QSettings("UMVPN", "Settings")
+        self.vpn_management_port = settings.value("vpn_management_port", 25340, type=int)
+        self.vpn_management_host = settings.value("vpn_management_host", "127.0.0.1", type=str)
+        
+    def save_settings(self):
+        """Save VPN settings to storage."""
+        settings = QSettings("UMVPN", "Settings")
+        settings.setValue("vpn_management_port", self.vpn_management_port)
+        settings.setValue("vpn_management_host", self.vpn_management_host)
+        
+    def save_selected_mode(self, mode):
+        """Save the currently selected mode."""
+        settings = QSettings("UMVPN", "Settings")
+        settings.setValue("last_selected_mode", mode)
+        
+    def load_saved_mode(self):
+        """Load and set the last selected mode."""
+        settings = QSettings("UMVPN", "Settings")
+        last_mode = settings.value("last_selected_mode", "JP", type=str)
+        index = self.regionComboBox.findText(last_mode)
+        if index >= 0:
+            self.regionComboBox.setCurrentIndex(index)
+    
+    def _show_options(self):
+        """Show the options dialog."""
+        if self.settings_window is None:
+            self.settings_window = OptionsDialog(self.parent(), self)
+        self.settings_window.show()
+        self.settings_window.raise_()
+        self.settings_window.activateWindow()
+
     def _call_error_window(self, title, message):
-        msg = QMessageBox()
+        msg = QMessageBox(self.parent())
         msg.setIcon(QMessageBox.Critical)
         msg.setText(f'<b>{title}</b>')
         msg.setInformativeText(message)
         msg.setWindowTitle("Error")
+        if self.parent().dev_mode:
+            msg.setWindowFlags(msg.windowFlags() | Qt.WindowStaysOnTopHint)
         msg.exec_()
+
+class OptionsDialog(QDialog):
+    """Options dialog for VPN settings configuration."""
+    
+    def __init__(self, parent, gui_widget):
+        super().__init__(parent)
+        self.gui_widget = gui_widget
+        self.setWindowTitle("Options")
+        self.setModal(True)
+        self.setFixedSize(300, 150)
+        
+        # Create layout
+        layout = QFormLayout()
+        
+        # VPN Management Host
+        self.host_input = QLineEdit()
+        self.host_input.setText(self.gui_widget.vpn_management_host)
+        layout.addRow("Management Host:", self.host_input)
+        
+        # VPN Management Port
+        self.port_input = QSpinBox()
+        self.port_input.setRange(1024, 65535)
+        self.port_input.setValue(self.gui_widget.vpn_management_port)
+        layout.addRow("Management Port:", self.port_input)
+        
+        # Buttons
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self.accept_settings)
+        button_box.rejected.connect(self.reject)
+        layout.addRow(button_box)
+        
+        self.setLayout(layout)
+        
+    def accept_settings(self):
+        """Apply and save the settings."""
+        # Update GUI widget settings
+        self.gui_widget.vpn_management_host = self.host_input.text()
+        self.gui_widget.vpn_management_port = self.port_input.value()
+        
+        # Save to persistent storage
+        self.gui_widget.save_settings()
+        
+        # Log the changes
+        log.info(f"VPN settings updated - Host: {self.gui_widget.vpn_management_host}, Port: {self.gui_widget.vpn_management_port}")
+        self.gui_widget.log_output(f"Settings updated - Host: {self.gui_widget.vpn_management_host}, Port: {self.gui_widget.vpn_management_port}")
+        
+        self.accept()
 
 class Window(QMainWindow):
     def __init__(self, dev_mode=False):
@@ -309,6 +538,9 @@ class Window(QMainWindow):
         self.setContentsMargins(0, self.titleBar.height(), 0, 0)
         self.resize(self.width_usr, self.titleBar.height() + self.height_usr)
         self.setCentralWidget(self.table_widget)
+        
+        # Register cleanup for unexpected termination
+        atexit.register(self.cleanup_vpn)
         
         # Set up system tray
         self.tray_icon = QSystemTrayIcon(self)
@@ -358,16 +590,20 @@ class Window(QMainWindow):
             try:
                 with open('.dev_window_pos', 'w') as f:
                     f.write(f"{self.x()},{self.y()}")
-            except:
-                pass
+            except Exception as e:
+                log.exception("Error saving window position to file")
 
     def closeEvent(self, event):
         close = QMessageBox()
         close.setWindowTitle("Close")
         close.setText("You sure?")
         close.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+        if self.dev_mode:
+            close.setWindowFlags(close.windowFlags() | Qt.WindowStaysOnTopHint)
         close = close.exec()
         if close == QMessageBox.Yes:
+            # Cleanup VPN before closing
+            self.cleanup_vpn()
             # Save window position in dev mode
             if self.dev_mode:
                 self.savePosition()
@@ -375,6 +611,16 @@ class Window(QMainWindow):
             event.accept()
         else:
             event.ignore()
+    
+    def cleanup_vpn(self):
+        """Cleanup VPN connection on app termination."""
+        try:
+            if hasattr(self, 'table_widget') and hasattr(self.table_widget, 'vpn_client'):
+                if self.table_widget.vpn_client and self.table_widget.is_connected:
+                    log.info("Cleaning up VPN connection on app exit")
+                    self.table_widget.vpn_client.stop()
+        except Exception as e:
+            log.exception("Error during VPN cleanup")
     
     def savePosition(self):
         settings = QSettings("UMVPN", "WindowPosition")
@@ -386,8 +632,8 @@ class Window(QMainWindow):
             try:
                 with open('.dev_window_pos', 'w') as f:
                     f.write(f"{self.x()},{self.y()}")
-            except:
-                pass
+            except Exception as e:
+                log.exception("Error saving window position to file")
     
     def restorePosition(self):
         # Check for position from dev-tools first
@@ -399,8 +645,8 @@ class Window(QMainWindow):
                 x, y = map(int, dev_pos.split(','))
                 self.move(x, y)
                 return
-            except ValueError:
-                pass
+            except ValueError as e:
+                log.exception("Error parsing dev position")
         
         # Fallback to QSettings
         settings = QSettings("UMVPN", "WindowPosition")
@@ -555,6 +801,7 @@ def main():
             log.info("Auto-reload disabled")
             app = create_app()
             window = Window(dev_mode=True)
+
             sys.exit(app.exec_())
         else:
             # Use the development tools for auto-reload
@@ -568,6 +815,7 @@ def main():
                 log.info("Running in normal mode...")
                 app = create_app()
                 window = Window(dev_mode=True)
+    
                 sys.exit(app.exec_())
     else:
         # Normal production mode
