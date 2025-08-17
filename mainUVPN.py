@@ -5,7 +5,7 @@ from PyQt5.QtWidgets import QVBoxLayout, QHBoxLayout, QMessageBox, QStyle, QActi
 from PyQt5.QtWidgets import QSystemTrayIcon, QTextEdit, QDialog, QSpinBox, QLineEdit
 from PyQt5.QtWidgets import QFormLayout, QDialogButtonBox
 from PyQt5 import QtCore
-from PyQt5.QtCore import QPoint, QSize, QSettings, pyqtSignal
+from PyQt5.QtCore import QPoint, QSize, QSettings, pyqtSignal, QTimer
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QIcon, QPalette, QColor, QFont
 import constants as cnts
@@ -14,7 +14,7 @@ from typing import Iterable
 import sys, os
 import time
 import atexit
-from lib.tools import pinger, handle_ping, resource_path, find_servers, get_best_connection, download_connection, find_existing_openvpn
+from lib.tools import pinger, handle_ping, resource_path, find_servers, get_best_connection, download_connection, find_existing_openvpn, get_current_ip
 from lib.openvpnclient import OpenVPNClient, VPNStatus
 # from lib.servers import SERVERS
 from version_handler import __version__
@@ -54,6 +54,10 @@ class GUI(QWidget):
         
         # Load saved mode selection
         self.load_saved_mode()
+        self.ip_update_timer = QTimer()
+        self.ip_update_timer.timeout.connect(lambda: self.__threaded_option(func=self.update_ip_status, args=(0,)))
+        self.ip_update_timer.start(60000)  # 30 seconds in milliseconds for redundancy
+        self.__threaded_option(func=self.update_ip_status, args=(0,))
     
     def __threaded_option(self,func: object = None,args: Iterable = ()):
         thread = threading.Thread(target=func,args=args)
@@ -159,6 +163,7 @@ class GUI(QWidget):
         self.qlinear = QLabel()
         self.plinear = QLabel()
         self.update_current_server()
+        self.qlinear.setText("IP: Loading...")
         layout.addWidget(self.qlinear, 0, 0)
         layout.addWidget(self.plinear, 0, 1, alignment=Qt.AlignRight)
         group.setLayout(layout)
@@ -167,17 +172,26 @@ class GUI(QWidget):
     def update_current_server(self):
         if self.is_connected:
             region = self.regionComboBox.currentText()
-            self.qlinear.setText(f"Connected to: {region}")
             self.plinear.setText(f'Status: <font color="green">Connected</font>')
             # Update tray status
             if hasattr(self.parent(), 'status_action'):
                 self.parent().status_action.setText(f"Connected to: {region}")
         else:
-            self.qlinear.setText("Status: Disconnected")
             self.plinear.setText(f'Status: <font color="red">Disconnected</font>')
             # Update tray status
             if hasattr(self.parent(), 'status_action'):
                 self.parent().status_action.setText("Disconnected")
+    
+    def update_ip_status(self, delay=0):
+        print("Delay Start updating IP")
+        time.sleep(delay)
+        print("Delay End updating IP")
+        self.qlinear.setText("IP: Loading...")
+        current_ip = get_current_ip()
+        if current_ip:
+            self.qlinear.setText(f"IP: {current_ip}")
+        else:
+            self.qlinear.setText("IP: Unable to fetch")
 
     def toggle_connection(self):
         if self.is_connected:
@@ -195,10 +209,12 @@ class GUI(QWidget):
                     return
             
             self.log_output(f"Connecting to {region}...")
+            # Update IP before connecting to show current IP with delay
+            # self.__threaded_option(func=self.update_ip_status, args=(2,))
             # Update UI immediately to show connecting state
             self.connectButton.setEnabled(False)
-            self.qlinear.setText("Status: Connecting...")
             self.plinear.setText(f'Status: <font color="orange">Connecting</font>')
+            self.regionComboBox.setEnabled(False)
             # Run connection in background thread
             self.__threaded_option(func=self._connect_vpn, args=(region,))
     
@@ -268,6 +284,7 @@ class GUI(QWidget):
         self.connectButton.setEnabled(True)
         self.qlinear.setText("Status: Disconnected")
         self.plinear.setText(f'Status: <font color="red">Disconnected</font>')
+        # Update IP after connection failure with delay
     
     def on_vpn_status_change(self, status: VPNStatus, message: str):
         if status == VPNStatus.CONNECTED:
@@ -276,7 +293,7 @@ class GUI(QWidget):
             self.disconnectButton.setEnabled(True)
             self.is_connected = True
             self.update_current_server()
-            self.__threaded_option(func=self.ping_event_loop)
+            self.__threaded_option(func=self.update_ip_status, args=(3,))
         elif status in (VPNStatus.DISCONNECTED, VPNStatus.ERROR):
             if status == VPNStatus.DISCONNECTED:
                 self.log_output("VPN Disconnected")
@@ -286,6 +303,7 @@ class GUI(QWidget):
             
             # Always reset to disconnected state on any non-connected status
             self._force_disconnect_state()
+            self.__threaded_option(func=self.update_ip_status, args=(1,))
             
             if status == VPNStatus.ERROR:
                 self._call_error_window("VPN Error", message)
@@ -300,6 +318,15 @@ class GUI(QWidget):
             self.update_current_server()
         except Exception as e:
             log.exception("Error forcing disconnect state")
+    
+    def cleanup_gui(self):
+        """Clean up GUI resources including timers."""
+        try:
+            if hasattr(self, 'ip_update_timer') and self.ip_update_timer:
+                self.ip_update_timer.stop()
+                log.info("IP status timer stopped during cleanup")
+        except Exception as e:
+            log.exception("Error during GUI cleanup")
     
     
     
@@ -607,6 +634,8 @@ class Window(QMainWindow):
             # Save window position in dev mode
             if self.dev_mode:
                 self.savePosition()
+            # Clean up GUI resources
+            self.table_widget.cleanup_gui()
             self.table_widget.close()
             event.accept()
         else:

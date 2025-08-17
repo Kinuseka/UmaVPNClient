@@ -92,3 +92,12 @@ def find_existing_openvpn():
             log.exception("Error finding existing OpenVPN processes")
         
         return existing_processes
+
+def get_current_ip():
+    try:
+        response = requests.get('https://api.ipify.org?format=json')
+        response.raise_for_status()
+        return response.json()['ip']
+    except Exception as e:
+        log.exception(f'Issue occured while fetching current IP: {e}')
+        return False
