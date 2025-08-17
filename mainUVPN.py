@@ -181,6 +181,10 @@ class GUI(QWidget):
             # Update tray status
             if hasattr(self.parent(), 'status_action'):
                 self.parent().status_action.setText("Disconnected")
+        
+        # Update tray tooltip
+        if hasattr(self.parent(), 'update_tray_tooltip'):
+            self.parent().update_tray_tooltip()
     
     def update_ip_status(self, delay=0):
         print("Delay Start updating IP")
@@ -215,6 +219,9 @@ class GUI(QWidget):
             self.connectButton.setEnabled(False)
             self.plinear.setText(f'Status: <font color="orange">Connecting</font>')
             self.regionComboBox.setEnabled(False)
+            # Update tray tooltip for connecting state
+            if hasattr(self.parent(), 'update_tray_tooltip'):
+                self.parent().update_tray_tooltip()
             # Run connection in background thread
             self.__threaded_option(func=self._connect_vpn, args=(region,))
     
@@ -274,6 +281,9 @@ class GUI(QWidget):
             self.disconnectButton.setEnabled(False)
             self.is_connected = False
             self.update_current_server()
+            # Update tray tooltip
+            if hasattr(self.parent(), 'update_tray_tooltip'):
+                self.parent().update_tray_tooltip()
         except Exception as e:
             error_msg = str(e) if str(e) else f"Unknown error ({type(e).__name__})"
             self.log_output(f"ERROR during disconnect: {error_msg}")
@@ -284,6 +294,9 @@ class GUI(QWidget):
         self.connectButton.setEnabled(True)
         self.qlinear.setText("Status: Disconnected")
         self.plinear.setText(f'Status: <font color="red">Disconnected</font>')
+        # Update tray tooltip
+        if hasattr(self.parent(), 'update_tray_tooltip'):
+            self.parent().update_tray_tooltip()
         # Update IP after connection failure with delay
     
     def on_vpn_status_change(self, status: VPNStatus, message: str):
@@ -316,6 +329,9 @@ class GUI(QWidget):
             self.disconnectButton.setEnabled(False)
             self.is_connected = False
             self.update_current_server()
+            # Update tray tooltip
+            if hasattr(self.parent(), 'update_tray_tooltip'):
+                self.parent().update_tray_tooltip()
         except Exception as e:
             log.exception("Error forcing disconnect state")
     
@@ -589,6 +605,9 @@ class Window(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon.show()
         
+        # Set initial tooltip
+        self.update_tray_tooltip()
+        
         # Set initial position and restore if needed
         if self.dev_mode:
             self.setWindowFlags(self.windowFlags() | QtCore.Qt.FramelessWindowHint | QtCore.Qt.WindowStaysOnTopHint)
@@ -610,6 +629,26 @@ class Window(QMainWindow):
                 self.show()
                 self.raise_()
                 self.activateWindow()
+    
+    def update_tray_tooltip(self):
+        """Update system tray tooltip with current connection status."""
+        if hasattr(self, 'table_widget'):
+            if self.table_widget.is_connected:
+                region = self.table_widget.regionComboBox.currentText()
+                tooltip = f"Uma VPN - Connected ({region})"
+            else:
+                # Check if we're in connecting state
+                if (hasattr(self.table_widget, 'connectButton') and 
+                    not self.table_widget.connectButton.isEnabled() and 
+                    not self.table_widget.is_connected):
+                    tooltip = "Uma VPN - Connecting..."
+                else:
+                    tooltip = "Uma VPN - Disconnected"
+        else:
+            tooltip = "Uma VPN - Disconnected"
+        
+        if hasattr(self, 'tray_icon'):
+            self.tray_icon.setToolTip(tooltip)
         
     def moveEvent(self, event):
         # Save position on move in dev mode
